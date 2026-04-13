@@ -1,6 +1,10 @@
 import asyncio
 import json
 import os
+import sys
+
+sys.stdout.reconfigure(encoding='utf-8')
+
 from dotenv import load_dotenv
 from groq import Groq
 from mcp import ClientSession, StdioServerParameters
@@ -41,26 +45,35 @@ async def call_mcp_tool(session: ClientSession, tool_name: str, tool_input: dict
 # ── AI LOOP ──────────────────────────────────────────────────────────────────
 
 async def run_agent_turn(session, groq_tools, messages):
-
+    retries = 0
     while True:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages, #history
-            tools=groq_tools,  #list of tools
-            tool_choice="auto", # checks whether tool is needed or not
-            max_tokens=1024,
-        )
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages, #history
+                tools=groq_tools,  #list of tools
+                tool_choice="auto", # checks whether tool is needed or not
+                max_tokens=1024,
+            )
+        except Exception as e:
+            if "tool_use_failed" in str(e) and retries < 3:
+                retries += 1
+                messages.append({
+                    "role": "user",
+                    "content": "You generated an invalid tool call format. Please generate your response again using native valid JSON tool arguments without any raw <function> tags."
+                })
+                # Silent retry in the background
+                continue
+            else:
+                print(f"\n❌ AI API Formatting Error: {e}")
+                print("🤖 (The AI hallucinated a function call and halted. Please try your prompt again.)\n")
+                break
 
         msg = response.choices[0].message  #extract ai response
         tool_calls = msg.tool_calls or []  # decision is stored
 
-        # ✅ ONLY print raw when tool is called
         if tool_calls:
-            print("\n🧠 AI RAW RESPONSE:")
-            print(msg)
-
-            print("\n🛠️ AI decided to call tool(s):")
-
+            # We silently process tool calls now without dumping the raw JSON to the screen
             messages.append({
                 "role": "assistant",
                 "content": msg.content or "",
@@ -81,12 +94,8 @@ async def run_agent_turn(session, groq_tools, messages):
                 tool_name = tool_call.function.name  #extract tool name
                 tool_input = json.loads(tool_call.function.arguments)
 
-                print(f"\n➡️ Tool Name: {tool_name}")
-                print(f"📥 Input: {tool_input}")
-
+                # Fetching tool result silently
                 output = await call_mcp_tool(session, tool_name, tool_input)
-
-                print(f"📤 Output:\n{output}")
 
                 messages.append({
                     "role": "tool",
@@ -120,6 +129,13 @@ async def main():
     print("           summarize messages from C08XXXXXX")
     print("Type 'exit' to quit.\n")
 
+    try:
+        with open("d:/slack-mcp/channels.json", "r", encoding="utf-8") as f:
+            channels = json.load(f)
+            channel_context_str = ", ".join([f"Name: {k} -> ID: {v}" for k, v in channels.items()])
+    except FileNotFoundError:
+        channel_context_str = "No channel mapping found."
+
     server = StdioServerParameters(
         command="d:/slack-mcp/venv/Scripts/python.exe",
         args=["d:/slack-mcp/server.py"],
@@ -138,10 +154,20 @@ async def main():
                 {
                     "role": "system",
                     "content": (
-                        "You are a concise Slack assistant. "
-                        "Use tools when needed. "
-                        "Keep replies short and clear. "
-                        "Extract channel IDs directly from the user message."
+                        "You are a Slack knowledge assistant. "
+                        f"AVAILABLE CHANNELS: {channel_context_str}. "
+                        "When the user mentions a channel by its Name, you MUST use its corresponding ID for tool calls.\n"
+                        "When the user asks about a problem or needs help finding information, "
+                        "Use the semantic_search tool to find relevant past discussions from Slack channels. "
+                        "Synthesize the search results into a clear, comprehensive, actionable answer. "
+                        "IMPORTANT: If you find multiple different solutions or answers discussed across different channels, you MUST mention all of them. Do not just summarize the first one you read. "
+                        "IMPORTANT: You must ONLY answer the user's specific question. Discard and ignore any search results or context that are unrelated to the specific topic requested. "
+                        "Always cite the channel name and relevant context from the results. "
+                        "Use read_messages and send_message tools for direct channel operations. "
+                        "IMPORTANT: If the user asks you to read, list, or give messages from a channel, you MUST display the actual messages verbatim. Do not suppress or summarize them into a single sentence. "
+                        "Extract channel IDs directly from the user message or the AVAILABLE CHANNELS list when provided. "
+                        "NOTE: Messages may contain '[Image Description: ...]' tags; these are generated by vision AI to describe image content. "
+                        "Keep replies short and clear."
                     ),
                 }
             ]

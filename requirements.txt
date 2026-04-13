@@ -1,0 +1,14 @@
+# Core
+slack-sdk
+python-dotenv
+groq
+mcp
+
+# Semantic Search
+faiss-cpu
+scikit-learn
+numpy
+
+# Testing
+pytest
+pytest-asyncio
